@@ -164,3 +164,69 @@ void log_err(const char *fmt, ...) {
     log_fd(STDERR_FILENO, fmt, ap);
     va_end(ap);
 }
+
+
+/* Reads everything from fd (starting at the current offset) into memory. */
+static int read_fd_all(int fd, char **out, size_t *len) {
+    size_t cap = 4096, n = 0;
+    char *b = malloc(cap);
+    if (!b) return -1;
+
+    for (;;) {
+        if (n + 1 >= cap) {
+            cap *= 2;
+            char *t = realloc(b, cap);
+            if (!t) { free(b); return -1; }
+            b = t;
+        }
+        ssize_t r = read(fd, b + n, cap - n - 1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            free(b);
+            return -1;
+        }
+        if (r == 0) break;
+        n += (size_t)r;
+    }
+    b[n] = '\0';
+    *out = b;
+    *len = n;
+    return 0;
+}
+
+int lr_from_fd(LineReader *lr, int fd) {
+    memset(lr, 0, sizeof(*lr));
+    if (lseek(fd, 0, SEEK_SET) == (off_t)-1) return -1;
+    return read_fd_all(fd, &lr->data, &lr->len);
+}
+
+int lr_open(LineReader *lr, const char *path) {
+    memset(lr, 0, sizeof(*lr));
+    int fd = open(path, O_RDONLY);
+    if (fd == -1) return -1;
+    int rc = read_fd_all(fd, &lr->data, &lr->len);
+    close(fd);
+    return rc;
+}
+
+/* Copies the next line (without '\n') into `line`; lines longer than the
+ * buffer are truncated. Returns 1 if a line was returned, 0 at end of file. */
+int lr_next(LineReader *lr, char *line, size_t size) {
+    if (!lr->data || lr->pos >= lr->len || size == 0) return 0;
+
+    size_t i = lr->pos;
+    while (i < lr->len && lr->data[i] != '\n') i++;
+
+    size_t n = i - lr->pos;
+    if (n >= size) n = size - 1;
+    memcpy(line, lr->data + lr->pos, n);
+    line[n] = '\0';
+
+    lr->pos = (i < lr->len) ? i + 1 : i;
+    return 1;
+}
+
+void lr_close(LineReader *lr) {
+    free(lr->data);
+    memset(lr, 0, sizeof(*lr));
+}
