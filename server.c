@@ -166,3 +166,198 @@ static void *handle_client(void *arg) {
     close(sock);
     return NULL;
 }
+
+
+void print_server_status(void) {
+    pthread_mutex_lock(&clients_mtx);
+    int clients = active_clients;
+    pthread_mutex_unlock(&clients_mtx);
+
+    long up = (long)(time(NULL) - start_time);
+    log_out("\n[status] PID %d | uptime %ldh %02ldm %02lds | connected clients: %d/%d | "
+           "logged-in sessions: %d/%d\n",
+           (int)getpid(), up / 3600, (up % 3600) / 60, up % 60,
+           clients, MAX_CLIENTS, count_active_sessions(), MAX_SESSIONS);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Graceful shutdown                                                         */
+/* ------------------------------------------------------------------------- */
+static void graceful_shutdown(int listen_fd) {
+    close(listen_fd);                       /* stop accepting new clients */
+
+    pthread_mutex_lock(&clients_mtx);
+    int notified = active_clients;
+    const char *bye = "\n\n*** Server is shutting down. You have been logged out. ***\n";
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_fds[i] != -1) {
+            /* MSG_DONTWAIT: never block here on a slow client */
+            ssize_t ignored = send(client_fds[i], bye, strlen(bye), MSG_DONTWAIT);
+            (void)ignored;
+            /* Makes the thread's blocked recv() return 0 -> it unwinds,
+             * logs the user out and exits by itself. */
+            shutdown(client_fds[i], SHUT_RDWR);
+        }
+    }
+    log_out("[shutdown] Notified %d connected client(s). Waiting up to %d s for threads...\n",
+           notified, SHUTDOWN_GRACE_SEC);
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += SHUTDOWN_GRACE_SEC;
+
+    while (active_clients > 0) {
+        if (pthread_cond_timedwait(&clients_cv, &clients_mtx, &deadline) == ETIMEDOUT)
+            break;
+    }
+    int remaining = active_clients;
+    pthread_mutex_unlock(&clients_mtx);
+
+    if (remaining > 0)
+        log_out("[shutdown] %d thread(s) still busy after timeout; exiting anyway.\n", remaining);
+    else
+        log_out("[shutdown] All client threads finished.\n");
+
+    destroy_session_manager();
+    log_out("[shutdown] Server stopped cleanly. Bye!\n");
+}
+
+
+/* ------------------------------------------------------------------------- */
+int main(int argc, char *argv[]) {
+    int port = PORT;
+    if (argc > 1 && (!parse_int(argv[1], &port) || port < 1 || port > 65535)) {
+        log_err("Usage: %s [port]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    start_time = time(NULL);
+    for (int i = 0; i < MAX_CLIENTS; i++) client_fds[i] = -1;
+
+    /* Self-pipe: the signal thread writes 1 byte here to wake poll(). */
+    int wake_pipe[2];
+    if (pipe(wake_pipe) == -1) {
+        log_err("pipe: %s\n", strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    /* Must happen before ANY other thread is created. */
+    if (signals_init(wake_pipe[1]) != 0) return EXIT_FAILURE;
+
+    mkdir(DATA_DIR, 0755);
+
+    /* The socket is bound BEFORE touching shared memory: if the port is
+     * taken (server already running) we must exit without disturbing the
+     * running server's session table. */
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd == -1) {
+        log_err("socket: %s\n", strerror(errno));
+        return EXIT_FAILURE;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons((unsigned short)port);
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+        log_err("bind: %s\n", strerror(errno));
+        if (errno == EADDRINUSE)
+            log_err("Port %d is already in use. Find the process with: lsof -i :%d\n",
+                    port, port);
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+    if (listen(listen_fd, SOMAXCONN) == -1) {
+        log_err("listen: %s\n", strerror(errno));
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+
+    if (init_session_manager() != 0) {
+        log_err("Could not initialise session manager. "
+                        "If no server is running, try: make reset-ipc\n");
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+
+    log_out("Server listening on port %d (PID %d)\n", port, (int)getpid());
+    log_out("  Ctrl+C / kill %d       -> graceful shutdown\n", (int)getpid());
+    log_out("  kill -USR1 %d          -> print server status\n", (int)getpid());
+
+    struct pollfd pfds[2];
+    pfds[0].fd = listen_fd;    pfds[0].events = POLLIN;
+    pfds[1].fd = wake_pipe[0]; pfds[1].events = POLLIN;
+
+    while (server_running()) {
+        int r = poll(pfds, 2, -1);
+        if (r == -1) {
+            if (errno == EINTR) continue;           /* interrupted: retry */
+            log_err("poll: %s\n", strerror(errno));
+            break;
+        }
+
+        if (pfds[1].revents & POLLIN) break;        /* shutdown requested */
+
+        if (pfds[0].revents & POLLIN) {
+            struct sockaddr_in caddr;
+            socklen_t clen = sizeof(caddr);
+            int cfd = accept(listen_fd, (struct sockaddr *)&caddr, &clen);
+            if (cfd == -1) {
+                if (errno == EINTR || errno == ECONNABORTED || errno == EAGAIN) continue;
+                log_err("accept: %s\n", strerror(errno));
+                continue;
+            }
+
+            /* Idle timeout: recv() fails with EAGAIN after N seconds of
+             * silence. (alarm()/SIGALRM can't be used per-thread: signals
+             * are delivered to the process, not to a particular client.) */
+            struct timeval tv = { CLIENT_IDLE_TIMEOUT_SEC, 0 };
+            setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#ifdef SO_NOSIGPIPE
+            int one = 1;                            /* macOS: no SIGPIPE on this socket */
+            setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+
+            if (!register_client(cfd)) {
+                send_message(cfd, "Server is busy, please try again later.\n");
+                close(cfd);
+                continue;
+            }
+
+            ClientArg *ca = malloc(sizeof(ClientArg));
+            if (!ca) {
+                unregister_client(cfd);
+                close(cfd);
+                continue;
+            }
+            ca->sock = cfd;
+            char ip[INET_ADDRSTRLEN] = "?";
+            inet_ntop(AF_INET, &caddr.sin_addr, ip, sizeof(ip));
+            snprintf(ca->peer, sizeof(ca->peer), "%s:%d", ip, ntohs(caddr.sin_port));
+            char peer_copy[64];                     /* ca is freed by the thread */
+            safe_copy(peer_copy, ca->peer, sizeof(peer_copy));
+
+            pthread_t tid;
+            int rc = pthread_create(&tid, NULL, handle_client, ca);
+            if (rc != 0) {
+                log_err("pthread_create: %s\n", strerror(rc));
+                unregister_client(cfd);
+                close(cfd);
+                free(ca);
+                continue;
+            }
+            pthread_detach(tid);
+            log_out("[+] Client %s connected (fd=%d)\n", peer_copy, cfd);
+        }
+    }
+
+    graceful_shutdown(listen_fd);
+    /* The wake pipe is intentionally NOT closed: the signal thread may still
+     * be running, and closing an fd another thread might write to is a race
+     * (the fd number could be reused). The OS closes it at exit. */
+    return EXIT_SUCCESS;
+}
