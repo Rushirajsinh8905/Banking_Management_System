@@ -314,3 +314,109 @@ int unlock_file(int fd) {
     }
     return 0;
 }
+
+
+/* ------------------------------------------------------------------------- */
+/* CSV rewrite: build new content in memory, then write+fsync+rename         */
+/* ------------------------------------------------------------------------- */
+int csv_rewrite_begin(CsvRewrite *rw, const char *path, const char *tmp_path) {
+    memset(rw, 0, sizeof(*rw));
+    rw->fd = -1;
+    rw->path = path;
+    rw->tmp = tmp_path;
+    sb_init(&rw->out);
+
+    rw->fd = open(path, O_RDWR);
+    if (rw->fd == -1) return -1;
+
+    if (lock_file(rw->fd, F_WRLCK) == -1) {
+        close(rw->fd);
+        return -1;
+    }
+
+    if (lr_from_fd(&rw->in, rw->fd) != 0) {
+        unlock_file(rw->fd);
+        close(rw->fd);
+        return -1;
+    }
+    return 0;
+}
+
+int csv_rewrite_commit(CsvRewrite *rw) {
+    int ok = 1;
+
+    lr_close(&rw->in);
+
+    int tfd = open(rw->tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (tfd == -1) {
+        ok = 0;
+    } else {
+        if (rw->out.len > 0 && write_all(tfd, rw->out.data, rw->out.len) != 0) ok = 0;
+        if (ok && fsync(tfd) != 0) ok = 0;          /* data really on disk */
+        if (close(tfd) != 0) ok = 0;
+    }
+
+    /* rename() is atomic: readers see either the old or the new file, never
+     * a half-written one - even if the server is killed right here. */
+    if (ok && rename(rw->tmp, rw->path) != 0) {
+        log_err("rename: %s\n", strerror(errno));
+        ok = 0;
+    }
+    if (ok) fsync_parent_dir(rw->path);
+    if (!ok) unlink(rw->tmp);
+
+    sb_free(&rw->out);
+    unlock_file(rw->fd);
+    close(rw->fd);
+    return ok ? 0 : -1;
+}
+
+void csv_rewrite_abort(CsvRewrite *rw) {
+    lr_close(&rw->in);
+    sb_free(&rw->out);
+    unlock_file(rw->fd);
+    close(rw->fd);
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* String buffer                                                             */
+/* ------------------------------------------------------------------------- */
+void sb_init(StrBuf *sb) {
+    sb->data = NULL;
+    sb->len = 0;
+    sb->cap = 0;
+}
+
+int sb_appendf(StrBuf *sb, const char *fmt, ...) {
+    va_list ap, ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int need = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+
+    if (need < 0) { va_end(ap2); return -1; }
+
+    if (sb->len + (size_t)need + 1 > sb->cap) {
+        size_t ncap = sb->cap ? sb->cap : 256;
+        while (ncap < sb->len + (size_t)need + 1) ncap *= 2;
+        char *p = realloc(sb->data, ncap);
+        if (!p) { va_end(ap2); return -1; }
+        sb->data = p;
+        sb->cap = ncap;
+    }
+
+    vsnprintf(sb->data + sb->len, sb->cap - sb->len, fmt, ap2);
+    va_end(ap2);
+    sb->len += (size_t)need;
+    return 0;
+}
+
+int sb_puts(StrBuf *sb, const char *s) {
+    return sb_appendf(sb, "%s", s);
+}
+
+void sb_free(StrBuf *sb) {
+    free(sb->data);
+    sb_init(sb);
+}
