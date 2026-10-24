@@ -113,3 +113,55 @@ void destroy_session_manager(void) {
     }
     log_out("✓ Shared memory segment and semaphore removed\n");
 }
+
+
+int check_and_register_login(int role, int user_id) {
+    if (!sessions) return 0;
+    sem_lock();
+
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (sessions->sessions[i].active &&
+            sessions->sessions[i].role == role &&
+            sessions->sessions[i].user_id == user_id) {
+            sem_unlock();
+            return 0;                       /* already logged in elsewhere */
+        }
+    }
+
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (!sessions->sessions[i].active) {
+            sessions->sessions[i].role = role;
+            sessions->sessions[i].user_id = user_id;
+            sessions->sessions[i].active = 1;
+            sem_unlock();
+            return 1;
+        }
+    }
+
+    sem_unlock();
+    return 0;                               /* table full */
+}
+
+void register_logout(int role, int user_id) {
+    if (!sessions) return;
+    sem_lock();
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        if (sessions->sessions[i].active &&
+            sessions->sessions[i].role == role &&
+            sessions->sessions[i].user_id == user_id) {
+            sessions->sessions[i].active = 0;
+            break;
+        }
+    }
+    sem_unlock();
+}
+
+int count_active_sessions(void) {
+    if (!sessions) return 0;
+    int n = 0;
+    sem_lock();
+    for (int i = 0; i < MAX_SESSIONS; i++)
+        if (sessions->sessions[i].active) n++;
+    sem_unlock();
+    return n;
+}
