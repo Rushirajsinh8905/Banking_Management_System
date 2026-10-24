@@ -95,38 +95,6 @@ int read_input(int sock, char *buffer, int size) {
 }
 
 /* ------------------------------------------------------------------------- */
-/* fcntl advisory locking                                                    */
-/* ------------------------------------------------------------------------- */
-int lock_file(int fd, int lock_type) {
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = (short)lock_type;
-    lock.l_whence = SEEK_SET;
-    lock.l_start = 0;
-    lock.l_len = 0;                                 /* whole file */
-
-    while (fcntl(fd, F_SETLKW, &lock) == -1) {
-        if (errno == EINTR) continue;               /* wait was interrupted */
-        log_err("Error acquiring lock: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-int unlock_file(int fd) {
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = F_UNLCK;
-    lock.l_whence = SEEK_SET;
-
-    if (fcntl(fd, F_SETLK, &lock) == -1) {
-        log_err("Error releasing lock: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-/* ------------------------------------------------------------------------- */
 /* write_all / logging / LineReader (system calls only)                      */
 /* ------------------------------------------------------------------------- */
 int write_all(int fd, const void *buf, size_t len) {
@@ -230,3 +198,86 @@ void lr_close(LineReader *lr) {
     free(lr->data);
     memset(lr, 0, sizeof(*lr));
 }
+
+
+/* ------------------------------------------------------------------------- */
+/* Misc helpers                                                              */
+/* ------------------------------------------------------------------------- */
+
+/* Trims whitespace on both ends, in place. */
+void trim_string(char *str) {
+    size_t len = strlen(str);
+    while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t' ||
+                       str[len - 1] == '\n' || str[len - 1] == '\r')) {
+        str[--len] = '\0';
+    }
+
+    size_t start = 0;
+    while (str[start] == ' ' || str[start] == '\t') start++;
+    if (start > 0) memmove(str, str + start, len - start + 1);
+}
+
+
+/* Bounded copy that always NUL-terminates (replaces unsafe strcpy). */
+void safe_copy(char *dst, const char *src, size_t size) {
+    if (size == 0) return;
+    snprintf(dst, size, "%s", src);
+}
+
+/* A username/password must be non-empty, fit in FIELD_MAX, and must not
+ * contain characters that would corrupt the CSV format. */
+int is_valid_field(const char *s) {
+    size_t len = strlen(s);
+    if (len == 0 || len >= FIELD_MAX) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == ',' || s[i] == '\n' || s[i] == '\r') return 0;
+    }
+    return 1;
+}
+
+/* Strict number parsing: rejects "abc", "12abc", "nan", "inf", negatives. */
+int parse_amount(const char *s, double *out, int allow_zero) {
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+
+    if (end == s || errno != 0) return 0;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return 0;
+    if (!isfinite(v)) return 0;
+    if (allow_zero ? (v < 0) : (v <= 0)) return 0;
+    if (v > MAX_AMOUNT) return 0;
+
+    *out = v;
+    return 1;
+}
+
+int parse_int(const char *s, int *out) {
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+
+    if (end == s || errno != 0) return 0;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return 0;
+    if (v < INT_MIN || v > INT_MAX) return 0;
+
+    *out = (int)v;
+    return 1;
+}
+
+/* localtime() uses a static buffer and is NOT thread-safe; localtime_r is. */
+void current_timestamp(char *buf, size_t size) {
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    strftime(buf, size, "%Y-%m-%d %H:%M:%S", &tm_now);
+}
+
+void sanitize_free_text(char *s) {
+    for (; *s; s++) {
+        if (*s == ',') *s = ';';
+        else if (*s == '\n' || *s == '\r') *s = ' ';
+    }
+}
+
