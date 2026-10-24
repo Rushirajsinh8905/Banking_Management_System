@@ -420,3 +420,69 @@ void sb_free(StrBuf *sb) {
     free(sb->data);
     sb_init(sb);
 }
+
+
+
+int append_line(const char *path, const char *line) {
+    int fd = open(path, O_WRONLY | O_APPEND);
+    if (fd == -1) return -1;
+
+    int rc = write_all(fd, line, strlen(line));
+    if (rc == 0) rc = fsync(fd);                /* data really on disk before we say "ok" */
+    close(fd);
+    return rc;
+}
+
+/* The caller (deposit/withdraw/transfer/loan credit) holds the customers lock
+ * while calling this, so the balance change and its passbook line are done in
+ * one locked section. Lock order: CUSTOMERS < TRANSACTIONS (see utils.h). */
+int log_transaction(int cid, const char *type, double amt, double balance_after) {
+    char ts[32], line[160];
+    current_timestamp(ts, sizeof(ts));
+    snprintf(line, sizeof(line), "%d,%s,%.2f,%.2f,%s\n", cid, type, amt, balance_after, ts);
+
+    db_wrlock(DB_TRANSACTIONS);
+    int rc = append_line(DATA_DIR "/transactions.csv", line);
+    db_unlock(DB_TRANSACTIONS);
+
+    if (rc != 0)
+        log_err("[ALERT] passbook write FAILED: customer %d %s %.2f (balance already changed)\n",
+                cid, type, amt);
+    return rc;
+}
+
+
+/* Caller must hold the write lock of the file, otherwise two threads could
+ * compute the same "next id". */
+int get_next_id_csv(const char *csv_path) {
+    LineReader lr;
+    if (lr_open(&lr, csv_path) != 0) return 1;
+
+    char line[512];
+    int max_id = 0;
+
+    if (lr_next(&lr, line, sizeof(line))) {         /* skip header */
+        while (lr_next(&lr, line, sizeof(line))) {
+            int id;
+            if (sscanf(line, "%d,", &id) == 1 && id > max_id) max_id = id;
+        }
+    }
+
+    lr_close(&lr);
+    return max_id + 1;
+}
+
+
+/* fsync() the directory that holds `path`, so the rename() itself survives a
+ * power failure (the file data was already fsync'ed). Best effort. */
+static void fsync_parent_dir(const char *path) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0'; else snprintf(dir, sizeof(dir), ".");
+
+    int dfd = open(dir, O_RDONLY);
+    if (dfd == -1) return;
+    fsync(dfd);
+    close(dfd);
+}
