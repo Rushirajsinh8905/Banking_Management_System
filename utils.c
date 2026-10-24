@@ -281,3 +281,36 @@ void sanitize_free_text(char *s) {
     }
 }
 
+
+
+/* ------------------------------------------------------------------------- */
+/* fcntl advisory locking                                                    */
+/* ------------------------------------------------------------------------- */
+int lock_file(int fd, int lock_type) {
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = (short)lock_type;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;                                 /* whole file */
+
+    while (fcntl(fd, F_SETLKW, &lock) == -1) {
+        if (errno == EINTR) continue;               /* wait was interrupted */
+        log_err("Error acquiring lock: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int unlock_file(int fd) {
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_UNLCK;
+    lock.l_whence = SEEK_SET;
+
+    if (fcntl(fd, F_SETLK, &lock) == -1) {
+        log_err("Error releasing lock: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
