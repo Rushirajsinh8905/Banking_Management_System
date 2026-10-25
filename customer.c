@@ -228,3 +228,104 @@ static void transfer_funds(int sock, int cid) {
         default:                    send_message(sock, "Invalid accounts\n"); break;
     }
 }
+
+
+/* Accepts Personal/Home/Education (any case) or just P/H/E. */
+static int normalize_loan_type(const char *in, char *out, size_t n) {
+    static const char *types[] = { "Personal", "Home", "Education" };
+    for (size_t i = 0; i < 3; i++) {
+        if (strcasecmp(in, types[i]) == 0 ||
+            (strlen(in) == 1 && (in[0] | 0x20) == (types[i][0] | 0x20))) {
+            safe_copy(out, types[i], n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void apply_loan(int sock, int cid) {
+    char buf[BUFFER_SIZE];
+    double amount;
+    int tenure;
+    char loan_type[20];
+
+    send_message(sock, "=== Welcome to Loan Portal ===\n");
+
+    send_message(sock, "Enter loan amount: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_amount(buf, &amount, 0)) {
+        send_message(sock, "Invalid amount\n");
+        return;
+    }
+
+    send_message(sock, "Enter loan type (Personal/Home/Education): ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!normalize_loan_type(buf, loan_type, sizeof(loan_type))) {
+        send_message(sock, "Invalid loan type\n");
+        return;
+    }
+
+    send_message(sock, "Enter tenure (years, 1-30): ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &tenure) || tenure <= 0 || tenure > 30) {
+        send_message(sock, "Invalid tenure\n");
+        return;
+    }
+
+    int loan_id = -1;
+
+    /* id generation + append under ONE write lock, otherwise two customers
+     * applying at the same moment could get the same loan id. */
+    db_wrlock(DB_LOANS);
+    loan_id = get_next_id_csv(LOANS_CSV);
+    LoanRecord l = { .loan_id = loan_id, .customer_id = cid, .amount = amount,
+                     .tenure = tenure };
+    safe_copy(l.type, loan_type, sizeof(l.type));
+    safe_copy(l.status, "pending", sizeof(l.status));
+    safe_copy(l.assigned, "unassigned", sizeof(l.assigned));
+    char loan_line[256];
+    format_loan_line(loan_line, sizeof(loan_line), &l);
+    if (append_line(LOANS_CSV, loan_line) != 0)      /* open + write + fsync */
+        loan_id = -1;
+    db_unlock(DB_LOANS);
+
+    if (loan_id < 0) {
+        send_message(sock, "Error submitting loan\n");
+        return;
+    }
+    snprintf(buf, sizeof(buf), "Loan application successful! Loan ID: %d\n", loan_id);
+    send_message(sock, buf);
+}
+
+static void check_loan_status(int sock, int cid) {
+    StrBuf out;
+    sb_init(&out);
+    int count = 0;
+
+    sb_appendf(&out, "\n=== Your Loan Applications ===\n"
+                     "Loan ID | Amount       | Type       | Tenure | Status    | Assigned To\n"
+                     "---------------------------------------------------------------------\n");
+
+    db_rdlock(DB_LOANS);
+    LineReader lr;
+    if (lr_open(&lr, LOANS_CSV) == 0) {
+        char line[300];
+        if (lr_next(&lr, line, sizeof(line))) {
+            while (lr_next(&lr, line, sizeof(line))) {
+                LoanRecord l;
+                trim_string(line);
+                if (parse_loan_line(line, &l) && l.customer_id == cid) {
+                    sb_appendf(&out, "%7d | %12.2f | %-10s | %6d | %-9s | %-12s\n",
+                               l.loan_id, l.amount, l.type, l.tenure, l.status, l.assigned);
+                    count++;
+                }
+            }
+        }
+        lr_close(&lr);
+    }
+    db_unlock(DB_LOANS);
+
+    if (count == 0) sb_appendf(&out, "No loan applications found\n");
+    if (out.data) send_message(sock, out.data);
+    sb_free(&out);
+}
