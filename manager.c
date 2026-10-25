@@ -93,3 +93,131 @@ void handle_manager(int sock, int mid) {
         }
     }
 }
+
+
+static void assign_loan(int sock) {
+    char buf[BUFFER_SIZE];
+    int lid, eid;
+
+    send_message(sock, "Enter loan ID: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &lid) || lid <= 0) { send_message(sock, "Invalid loan ID\n"); return; }
+
+    send_message(sock, "Enter employee ID: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &eid) || eid <= 0) { send_message(sock, "Invalid employee ID\n"); return; }
+
+    /* FIX: loans could be assigned to employee IDs that don't exist. */
+    db_rdlock(DB_EMPLOYEES);
+    int emp_exists = find_account_by_id(ROLE_EMPLOYEE, eid, NULL);
+    db_unlock(DB_EMPLOYEES);
+    if (!emp_exists) {
+        send_message(sock, "Employee not found\n");
+        return;
+    }
+
+    enum { NOT_FOUND, NOT_PENDING, DONE, IO_FAIL } status = NOT_FOUND;
+    CsvRewrite rw;
+
+    db_wrlock(DB_LOANS);
+    if (csv_rewrite_begin(&rw, LOANS_CSV, LOANS_TMP) != 0) {
+        db_unlock(DB_LOANS);
+        send_message(sock, "Error opening file\n");
+        return;
+    }
+
+    char line[300];
+    if (!lr_next(&rw.in, line, sizeof(line))) line[0] = '\0';
+    sb_puts(&rw.out, LOANS_HEADER);
+
+    while (lr_next(&rw.in, line, sizeof(line))) {
+        LoanRecord l;
+        trim_string(line);
+        if (!parse_loan_line(line, &l)) {
+            if (line[0]) sb_appendf(&rw.out, "%s\n", line);
+            continue;
+        }
+        if (l.loan_id == lid) {
+            if (strcmp(l.status, "pending") != 0) {
+                status = NOT_PENDING;
+            } else {
+                snprintf(l.assigned, sizeof(l.assigned), "%d", eid);
+                status = DONE;
+            }
+        }
+        write_loan_line(&rw.out, &l);
+    }
+
+    if (status == DONE) { if (csv_rewrite_commit(&rw) != 0) status = IO_FAIL; }
+    else csv_rewrite_abort(&rw);
+    db_unlock(DB_LOANS);
+
+    switch (status) {
+        case DONE:        send_message(sock, "Loan assigned\n"); break;
+        case NOT_PENDING: send_message(sock, "Loan has already been processed\n"); break;
+        case IO_FAIL:     send_message(sock, "Error saving changes\n"); break;
+        default:          send_message(sock, "Loan not found\n"); break;
+    }
+}
+
+static void view_feedback(int sock) {
+    StrBuf out;
+    sb_init(&out);
+    int count = 0, unreviewed = 0;
+    sb_appendf(&out, "\n=== Customer Feedback ===\n");
+
+    db_rdlock(DB_FEEDBACK);
+    LineReader lr;
+    if (lr_open(&lr, FEEDBACK_CSV) == 0) {
+        char line[512];
+        if (lr_next(&lr, line, sizeof(line))) {
+            while (lr_next(&lr, line, sizeof(line))) {
+                FeedbackRecord f;
+                trim_string(line);
+                if (parse_feedback_line(line, &f)) {
+                    sb_appendf(&out, "ID: %d | Customer: %d | Message: %s | Reviewed: %s\n",
+                               f.id, f.customer_id, f.message, f.reviewed ? "Yes" : "No");
+                    count++;
+                    if (!f.reviewed) unreviewed++;
+                }
+            }
+        }
+        lr_close(&lr);
+    }
+    db_unlock(DB_FEEDBACK);
+
+    if (count == 0) sb_appendf(&out, "No feedback available\n");
+    if (out.data) send_message(sock, out.data);
+    sb_free(&out);
+
+    if (unreviewed == 0) return;
+
+    /* NEW: the 'reviewed' column existed but nothing ever set it. */
+    char buf[BUFFER_SIZE];
+    send_message(sock, "Mark all feedback as reviewed? (y/n): ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (buf[0] != 'y' && buf[0] != 'Y') return;
+
+    CsvRewrite rw;
+    int ok = 0;
+    db_wrlock(DB_FEEDBACK);
+    if (csv_rewrite_begin(&rw, FEEDBACK_CSV, FEEDBACK_TMP) == 0) {
+        char line[512];
+        if (!lr_next(&rw.in, line, sizeof(line))) line[0] = '\0';
+        sb_puts(&rw.out, FEEDBACK_HEADER);
+        while (lr_next(&rw.in, line, sizeof(line))) {
+            FeedbackRecord f;
+            trim_string(line);
+            if (!parse_feedback_line(line, &f)) {
+                if (line[0]) sb_appendf(&rw.out, "%s\n", line);
+                continue;
+            }
+            f.reviewed = 1;
+            write_feedback_line(&rw.out, &f);
+        }
+        ok = (csv_rewrite_commit(&rw) == 0);
+    }
+    db_unlock(DB_FEEDBACK);
+
+    send_message(sock, ok ? "All feedback marked as reviewed\n" : "Error updating feedback\n");
+}
