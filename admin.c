@@ -81,3 +81,151 @@ void handle_admin(int sock, int aid) {
         }
     }
 }
+
+
+/* Starts a rewrite of role's CSV that copies every row except `id`.
+ * Caller holds the write lock and must commit or abort `rw`. */
+static int begin_remove_row(int role, int id, CsvRewrite *rw) {
+    if (csv_rewrite_begin(rw, role_csv_path(role), role_tmp_path(role)) != 0) return -1;
+
+    char line[256];
+    if (!lr_next(&rw->in, line, sizeof(line))) line[0] = '\0';
+    sb_puts(&rw->out, role_csv_header(role));
+
+    while (lr_next(&rw->in, line, sizeof(line))) {
+        AccountRecord r;
+        trim_string(line);
+        if (parse_account_line(role, line, &r)) {
+            if (r.id != id) write_account_line(role, &rw->out, &r);
+        } else if (line[0]) {
+            sb_appendf(&rw->out, "%s\n", line);
+        }
+    }
+    return 0;
+}
+
+static int append_account(int role, const AccountRecord *r) {
+    char line[256];
+    format_account_line(role, line, sizeof(line), r);
+    return append_line(role_csv_path(role), line);
+}
+
+/* Pending loans assigned to an employee who is being promoted would be stuck
+ * forever (the employee ID disappears). Put them back to "unassigned" so a
+ * manager can re-assign them. Caller holds db_wrlock(DB_LOANS).
+ * Returns number of loans changed, -1 on error. */
+static int unassign_pending_loans(int eid) {
+    char emp_id_str[20];
+    snprintf(emp_id_str, sizeof(emp_id_str), "%d", eid);
+
+    CsvRewrite rw;
+    if (csv_rewrite_begin(&rw, LOANS_CSV, LOANS_TMP) != 0) return -1;
+
+    char line[300];
+    int changed = 0;
+    if (!lr_next(&rw.in, line, sizeof(line))) line[0] = '\0';
+    sb_puts(&rw.out, LOANS_HEADER);
+
+    while (lr_next(&rw.in, line, sizeof(line))) {
+        LoanRecord l;
+        trim_string(line);
+        if (!parse_loan_line(line, &l)) {
+            if (line[0]) sb_appendf(&rw.out, "%s\n", line);
+            continue;
+        }
+        if (strcmp(l.assigned, emp_id_str) == 0 && strcmp(l.status, "pending") == 0) {
+            safe_copy(l.assigned, "unassigned", sizeof(l.assigned));
+            changed++;
+        }
+        write_loan_line(&rw.out, &l);
+    }
+
+    if (changed == 0) { csv_rewrite_abort(&rw); return 0; }
+    return csv_rewrite_commit(&rw) == 0 ? changed : -1;
+}
+
+/* Moves an account from one staff file to the other.
+ * FIX: the old version did this with NO locks. Locks are taken in the global order:
+ * LOANS < EMPLOYEES < MANAGERS - the same for promote AND demote, so the two
+ * operations can never deadlock each other. */
+static void move_staff(int sock, int from_role, int to_role, int id) {
+    AccountRecord rec;
+    CsvRewrite rw;
+    char msg[BUFFER_SIZE];
+    int promoting = (from_role == ROLE_EMPLOYEE);
+    int new_id = -1, loans_reset = 0;
+    const char *err = NULL;
+
+    if (promoting) db_wrlock(DB_LOANS);
+    db_wrlock(DB_EMPLOYEES);
+    db_wrlock(DB_MANAGERS);
+
+    if (!find_account_by_id(from_role, id, &rec)) {
+        err = promoting ? "Employee not found\n" : "Manager not found\n";
+    } else if (find_account_by_username(to_role, rec.username, NULL)) {
+        err = "An account with that username already exists in the target role\n";
+    } else if (begin_remove_row(from_role, id, &rw) != 0) {
+        err = "Error opening file\n";
+    } else {
+        AccountRecord moved = rec;
+        new_id = get_next_id_csv(role_csv_path(to_role));
+        moved.id = new_id;
+
+        if (append_account(to_role, &moved) != 0) {
+            csv_rewrite_abort(&rw);
+            err = "Error writing target file\n";
+        } else if (csv_rewrite_commit(&rw) != 0) {
+            err = "Error saving changes\n";
+        } else if (promoting) {
+            loans_reset = unassign_pending_loans(id);
+        }
+    }
+
+    db_unlock(DB_MANAGERS);
+    db_unlock(DB_EMPLOYEES);
+    if (promoting) db_unlock(DB_LOANS);
+
+    if (err) { send_message(sock, err); return; }
+
+    if (promoting) {
+        snprintf(msg, sizeof(msg),
+                 "Employee promoted to Manager successfully (new Manager ID: %d)\n", new_id);
+        send_message(sock, msg);
+        if (loans_reset > 0) {
+            snprintf(msg, sizeof(msg),
+                     "%d pending loan(s) were unassigned and need to be re-assigned\n", loans_reset);
+            send_message(sock, msg);
+        }
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "Manager demoted to Employee successfully (new Employee ID: %d)\n", new_id);
+        send_message(sock, msg);
+    }
+}
+
+static void manage_user_roles(int sock) {
+    char buf[BUFFER_SIZE];
+    int choice, id;
+
+    send_message(sock,
+        "\n=== Manage User Roles ===\n"
+        "1. Promote Employee to Manager\n"
+        "2. Demote Manager to Employee\n"
+        "Choice: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &choice) || (choice != 1 && choice != 2)) {
+        send_message(sock, "Invalid choice\n");
+        return;
+    }
+
+    send_message(sock, choice == 1 ? "Enter employee ID to promote: "
+                                   : "Enter manager ID to demote: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &id) || id <= 0) {
+        send_message(sock, "Invalid ID\n");
+        return;
+    }
+
+    if (choice == 1) move_staff(sock, ROLE_EMPLOYEE, ROLE_MANAGER, id);
+    else             move_staff(sock, ROLE_MANAGER, ROLE_EMPLOYEE, id);
+}
