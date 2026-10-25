@@ -270,3 +270,107 @@ static void process_loan(int sock, int eid) {
         default:          send_message(sock, "Loan not found\n"); break;
     }
 }
+
+
+static void view_customer_transactions(int sock) {
+    char buf[BUFFER_SIZE];
+    int cid;
+
+    send_message(sock, "Enter customer ID: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &cid) || cid <= 0) { send_message(sock, "Invalid ID\n"); return; }
+
+    StrBuf out;
+    sb_init(&out);
+    int count = 0;
+    sb_appendf(&out, "\n=== Customer Transaction History (Passbook) ===\n");
+
+    db_rdlock(DB_TRANSACTIONS);
+    LineReader lr;
+    if (lr_open(&lr, TRANSACTIONS_CSV) == 0) {
+        char line[256];
+        if (lr_next(&lr, line, sizeof(line))) {
+            while (lr_next(&lr, line, sizeof(line))) {
+                int customer_id;
+                char type[20], timestamp[50];
+                double amount, balance_after;
+                trim_string(line);
+                if (sscanf(line, "%d,%19[^,],%lf,%lf,%49[^\n]",
+                           &customer_id, type, &amount, &balance_after, timestamp) == 5 &&
+                    customer_id == cid) {
+                    sb_appendf(&out, "%s: %.2f | Balance: %.2f | %s\n",
+                               type, amount, balance_after, timestamp);
+                    count++;
+                }
+            }
+        }
+        lr_close(&lr);
+    }
+    db_unlock(DB_TRANSACTIONS);
+
+    if (count == 0) sb_appendf(&out, "No transactions found for this customer\n");
+    if (out.data) send_message(sock, out.data);
+    sb_free(&out);
+}
+
+/* Closes a customer account (PDF: employee "opening, modifying, or closing
+ * accounts"). The row is NOT deleted: it is marked ACCOUNT_CLOSED, so the
+ * customer id can never be reused and the passbook history stays valid.
+ * Rule: the balance must be 0.00 (money never disappears). */
+static void close_account(int sock) {
+    char buf[BUFFER_SIZE];
+    int cid;
+
+    send_message(sock, "Enter customer ID to close: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (!parse_int(buf, &cid) || cid <= 0) { send_message(sock, "Invalid ID\n"); return; }
+
+    send_message(sock, "Type YES to permanently close this account: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (strcmp(buf, "YES") != 0) { send_message(sock, "Cancelled\n"); return; }
+
+    enum { C_NOT_FOUND, C_ALREADY, C_HAS_BALANCE, C_DONE, C_IO } status = C_NOT_FOUND;
+    CsvRewrite rw;
+
+    db_wrlock(DB_CUSTOMERS);
+    if (csv_rewrite_begin(&rw, CUSTOMERS_CSV, role_tmp_path(ROLE_CUSTOMER)) != 0) {
+        db_unlock(DB_CUSTOMERS);
+        send_message(sock, "Error opening file\n");
+        return;
+    }
+
+    char line[256];
+    if (!lr_next(&rw.in, line, sizeof(line))) line[0] = '\0';
+    sb_puts(&rw.out, role_csv_header(ROLE_CUSTOMER));
+
+    while (lr_next(&rw.in, line, sizeof(line))) {
+        AccountRecord r;
+        trim_string(line);
+        if (!parse_account_line(ROLE_CUSTOMER, line, &r)) {
+            if (line[0]) sb_appendf(&rw.out, "%s\n", line);
+            continue;
+        }
+        if (r.id == cid) {
+            if (r.active == ACCOUNT_CLOSED)  status = C_ALREADY;
+            else if (r.balance > 0.004)      status = C_HAS_BALANCE;
+            else { r.active = ACCOUNT_CLOSED; status = C_DONE; }
+        }
+        write_account_line(ROLE_CUSTOMER, &rw.out, &r);
+    }
+
+    if (status == C_DONE) {
+        if (csv_rewrite_commit(&rw) != 0) status = C_IO;
+        else log_transaction(cid, "ACCOUNT_CLOSED", 0.0, 0.0);
+    } else {
+        csv_rewrite_abort(&rw);
+    }
+    db_unlock(DB_CUSTOMERS);
+
+    switch (status) {
+        case C_DONE:        send_message(sock, "Account closed\n"); break;
+        case C_ALREADY:     send_message(sock, "Account is already closed\n"); break;
+        case C_HAS_BALANCE: send_message(sock, "Balance must be 0.00 before closing (customer must withdraw or transfer it first)\n"); break;
+        case C_IO:          send_message(sock, "Error saving changes\n"); break;
+        default:            send_message(sock, "Account not found\n"); break;
+    }
+}
