@@ -329,3 +329,64 @@ static void check_loan_status(int sock, int cid) {
     if (out.data) send_message(sock, out.data);
     sb_free(&out);
 }
+
+
+static void add_feedback(int sock, int cid) {
+    char buf[BUFFER_SIZE];
+
+    send_message(sock, "Enter feedback message: ");
+    if (!read_input(sock, buf, BUFFER_SIZE)) return;
+    if (buf[0] == '\0') {
+        send_message(sock, "Feedback cannot be empty\n");
+        return;
+    }
+
+    FeedbackRecord f;
+    memset(&f, 0, sizeof(f));
+    f.customer_id = cid;
+    safe_copy(f.message, buf, sizeof(f.message));   /* commas sanitised on write */
+
+    db_wrlock(DB_FEEDBACK);
+    f.id = get_next_id_csv(FEEDBACK_CSV);
+    char fb_line[320];
+    format_feedback_line(fb_line, sizeof(fb_line), &f);
+    int fb_ok = (append_line(FEEDBACK_CSV, fb_line) == 0);   /* open + write + fsync */
+    db_unlock(DB_FEEDBACK);
+
+    send_message(sock, fb_ok ? "Feedback submitted successfully\n" : "Error saving feedback\n");
+}
+
+static void view_transactions(int sock, int cid) {
+    StrBuf out;
+    sb_init(&out);
+    int count = 0;
+
+    sb_appendf(&out, "\n=== Transaction History ===\n");
+
+    db_rdlock(DB_TRANSACTIONS);
+    LineReader lr;
+    if (lr_open(&lr, TRANSACTIONS_CSV) == 0) {
+        char line[256];
+        if (lr_next(&lr, line, sizeof(line))) {
+            while (lr_next(&lr, line, sizeof(line))) {
+                int customer_id;
+                char type[20], timestamp[50];
+                double amount, balance_after;
+                trim_string(line);
+                if (sscanf(line, "%d,%19[^,],%lf,%lf,%49[^\n]",
+                           &customer_id, type, &amount, &balance_after, timestamp) == 5 &&
+                    customer_id == cid) {
+                    sb_appendf(&out, "%s: %.2f | Balance: %.2f | %s\n",
+                               type, amount, balance_after, timestamp);
+                    count++;
+                }
+            }
+        }
+        lr_close(&lr);
+    }
+    db_unlock(DB_TRANSACTIONS);
+
+    if (count == 0) sb_appendf(&out, "No transactions found\n");
+    if (out.data) send_message(sock, out.data);
+    sb_free(&out);
+}
