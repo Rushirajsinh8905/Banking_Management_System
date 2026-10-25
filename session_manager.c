@@ -114,7 +114,6 @@ void destroy_session_manager(void) {
     log_out("✓ Shared memory segment and semaphore removed\n");
 }
 
-
 int check_and_register_login(int role, int user_id) {
     if (!sessions) return 0;
     sem_lock();

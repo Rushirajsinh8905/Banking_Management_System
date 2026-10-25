@@ -8,42 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
-void handle_employee(int sock, int eid) {
-    char buffer[BUFFER_SIZE];
-
-    for (;;) {
-        send_message(sock,
-            "\n=== Employee Menu ===\n"
-            "1. Add New Customer\n"
-            "2. Modify Customer Details\n"
-            "3. Process Loan Applications\n"
-            "4. View Assigned Loan Applications\n"
-            "5. View Customer Transactions (Passbook)\n"
-            "6. Change Password\n"
-            "7. Close Customer Account\n"
-            "8. Logout\n"
-            "Choice: ");
-
-        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
-        int choice;
-        if (!parse_int(buffer, &choice)) choice = -1;
-
-        switch (choice) {
-            case 1: add_customer(sock); break;
-            case 2: modify_account_details(sock, ROLE_CUSTOMER); break;
-            case 3: process_loan(sock, eid); break;
-            case 4: view_assigned_loans(sock, eid); break;
-            case 5: view_customer_transactions(sock); break;
-            case 6: change_password(sock, ROLE_EMPLOYEE, eid); break;
-            case 7: close_account(sock); break;
-            case 8: return;
-            default: send_message(sock, "Invalid choice\n");
-        }
-    }
-}
-
-
 static void add_customer(int sock) {
     char buf[BUFFER_SIZE];
     char username[FIELD_MAX], password[FIELD_MAX];
@@ -130,7 +94,6 @@ static void view_assigned_loans(int sock, int eid) {
     if (out.data) send_message(sock, out.data);
     sb_free(&out);
 }
-
 
 /* Caller holds db_wrlock(DB_CUSTOMERS). Returns 0 on success. */
 static int credit_customer(int cid, double amount, double *new_balance) {
@@ -271,7 +234,6 @@ static void process_loan(int sock, int eid) {
     }
 }
 
-
 static void view_customer_transactions(int sock) {
     char buf[BUFFER_SIZE];
     int cid;
@@ -372,5 +334,39 @@ static void close_account(int sock) {
         case C_HAS_BALANCE: send_message(sock, "Balance must be 0.00 before closing (customer must withdraw or transfer it first)\n"); break;
         case C_IO:          send_message(sock, "Error saving changes\n"); break;
         default:            send_message(sock, "Account not found\n"); break;
+    }
+}
+
+void handle_employee(int sock, int eid) {
+    char buffer[BUFFER_SIZE];
+
+    for (;;) {
+        send_message(sock,
+            "\n=== Employee Menu ===\n"
+            "1. Add New Customer\n"
+            "2. Modify Customer Details\n"
+            "3. Process Loan Applications\n"
+            "4. View Assigned Loan Applications\n"
+            "5. View Customer Transactions (Passbook)\n"
+            "6. Change Password\n"
+            "7. Close Customer Account\n"
+            "8. Logout\n"
+            "Choice: ");
+
+        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
+        int choice;
+        if (!parse_int(buffer, &choice)) choice = -1;
+
+        switch (choice) {
+            case 1: add_customer(sock); break;
+            case 2: modify_account_details(sock, ROLE_CUSTOMER); break;
+            case 3: process_loan(sock, eid); break;
+            case 4: view_assigned_loans(sock, eid); break;
+            case 5: view_customer_transactions(sock); break;
+            case 6: change_password(sock, ROLE_EMPLOYEE, eid); break;
+            case 7: close_account(sock); break;
+            case 8: return;
+            default: send_message(sock, "Invalid choice\n");
+        }
     }
 }

@@ -51,38 +51,6 @@ static void add_employee(int sock) {
     send_message(sock, buf);
 }
 
-
-void handle_admin(int sock, int aid) {
-    char buffer[BUFFER_SIZE];
-
-    for (;;) {
-        send_message(sock,
-            "\n=== Admin Menu ===\n"
-            "1. Add New Bank Employee\n"
-            "2. Modify Customer Details\n"
-            "3. Modify Employee Details\n"
-            "4. Manage User Roles\n"
-            "5. Change Password\n"
-            "6. Logout\n"
-            "Choice: ");
-
-        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
-        int choice;
-        if (!parse_int(buffer, &choice)) choice = -1;
-
-        switch (choice) {
-            case 1: add_employee(sock); break;
-            case 2: modify_account_details(sock, ROLE_CUSTOMER); break;
-            case 3: modify_account_details(sock, ROLE_EMPLOYEE); break;
-            case 4: manage_user_roles(sock); break;
-            case 5: change_password(sock, ROLE_ADMIN, aid); break;
-            case 6: return;
-            default: send_message(sock, "Invalid choice\n");
-        }
-    }
-}
-
-
 /* Starts a rewrite of role's CSV that copies every row except `id`.
  * Caller holds the write lock and must commit or abort `rw`. */
 static int begin_remove_row(int role, int id, CsvRewrite *rw) {
@@ -228,4 +196,34 @@ static void manage_user_roles(int sock) {
 
     if (choice == 1) move_staff(sock, ROLE_EMPLOYEE, ROLE_MANAGER, id);
     else             move_staff(sock, ROLE_MANAGER, ROLE_EMPLOYEE, id);
+}
+
+void handle_admin(int sock, int aid) {
+    char buffer[BUFFER_SIZE];
+
+    for (;;) {
+        send_message(sock,
+            "\n=== Admin Menu ===\n"
+            "1. Add New Bank Employee\n"
+            "2. Modify Customer Details\n"
+            "3. Modify Employee Details\n"
+            "4. Manage User Roles\n"
+            "5. Change Password\n"
+            "6. Logout\n"
+            "Choice: ");
+
+        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
+        int choice;
+        if (!parse_int(buffer, &choice)) choice = -1;
+
+        switch (choice) {
+            case 1: add_employee(sock); break;
+            case 2: modify_account_details(sock, ROLE_CUSTOMER); break;
+            case 3: modify_account_details(sock, ROLE_EMPLOYEE); break;
+            case 4: manage_user_roles(sock); break;
+            case 5: change_password(sock, ROLE_ADMIN, aid); break;
+            case 6: return;
+            default: send_message(sock, "Invalid choice\n");
+        }
+    }
 }

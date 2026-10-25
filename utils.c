@@ -95,6 +95,38 @@ int read_input(int sock, char *buffer, int size) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* fcntl advisory locking                                                    */
+/* ------------------------------------------------------------------------- */
+int lock_file(int fd, int lock_type) {
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = (short)lock_type;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 0;
+    lock.l_len = 0;                                 /* whole file */
+
+    while (fcntl(fd, F_SETLKW, &lock) == -1) {
+        if (errno == EINTR) continue;               /* wait was interrupted */
+        log_err("Error acquiring lock: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int unlock_file(int fd) {
+    struct flock lock;
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_UNLCK;
+    lock.l_whence = SEEK_SET;
+
+    if (fcntl(fd, F_SETLK, &lock) == -1) {
+        log_err("Error releasing lock: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------------- */
 /* write_all / logging / LineReader (system calls only)                      */
 /* ------------------------------------------------------------------------- */
 int write_all(int fd, const void *buf, size_t len) {
@@ -132,7 +164,6 @@ void log_err(const char *fmt, ...) {
     log_fd(STDERR_FILENO, fmt, ap);
     va_end(ap);
 }
-
 
 /* Reads everything from fd (starting at the current offset) into memory. */
 static int read_fd_all(int fd, char **out, size_t *len) {
@@ -199,123 +230,6 @@ void lr_close(LineReader *lr) {
     memset(lr, 0, sizeof(*lr));
 }
 
-
-/* ------------------------------------------------------------------------- */
-/* Misc helpers                                                              */
-/* ------------------------------------------------------------------------- */
-
-/* Trims whitespace on both ends, in place. */
-void trim_string(char *str) {
-    size_t len = strlen(str);
-    while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t' ||
-                       str[len - 1] == '\n' || str[len - 1] == '\r')) {
-        str[--len] = '\0';
-    }
-
-    size_t start = 0;
-    while (str[start] == ' ' || str[start] == '\t') start++;
-    if (start > 0) memmove(str, str + start, len - start + 1);
-}
-
-
-/* Bounded copy that always NUL-terminates (replaces unsafe strcpy). */
-void safe_copy(char *dst, const char *src, size_t size) {
-    if (size == 0) return;
-    snprintf(dst, size, "%s", src);
-}
-
-/* A username/password must be non-empty, fit in FIELD_MAX, and must not
- * contain characters that would corrupt the CSV format. */
-int is_valid_field(const char *s) {
-    size_t len = strlen(s);
-    if (len == 0 || len >= FIELD_MAX) return 0;
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == ',' || s[i] == '\n' || s[i] == '\r') return 0;
-    }
-    return 1;
-}
-
-/* Strict number parsing: rejects "abc", "12abc", "nan", "inf", negatives. */
-int parse_amount(const char *s, double *out, int allow_zero) {
-    char *end;
-    errno = 0;
-    double v = strtod(s, &end);
-
-    if (end == s || errno != 0) return 0;
-    while (*end == ' ' || *end == '\t') end++;
-    if (*end != '\0') return 0;
-    if (!isfinite(v)) return 0;
-    if (allow_zero ? (v < 0) : (v <= 0)) return 0;
-    if (v > MAX_AMOUNT) return 0;
-
-    *out = v;
-    return 1;
-}
-
-int parse_int(const char *s, int *out) {
-    char *end;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-
-    if (end == s || errno != 0) return 0;
-    while (*end == ' ' || *end == '\t') end++;
-    if (*end != '\0') return 0;
-    if (v < INT_MIN || v > INT_MAX) return 0;
-
-    *out = (int)v;
-    return 1;
-}
-
-/* localtime() uses a static buffer and is NOT thread-safe; localtime_r is. */
-void current_timestamp(char *buf, size_t size) {
-    time_t now = time(NULL);
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-    strftime(buf, size, "%Y-%m-%d %H:%M:%S", &tm_now);
-}
-
-void sanitize_free_text(char *s) {
-    for (; *s; s++) {
-        if (*s == ',') *s = ';';
-        else if (*s == '\n' || *s == '\r') *s = ' ';
-    }
-}
-
-
-
-/* ------------------------------------------------------------------------- */
-/* fcntl advisory locking                                                    */
-/* ------------------------------------------------------------------------- */
-int lock_file(int fd, int lock_type) {
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = (short)lock_type;
-    lock.l_whence = SEEK_SET;
-    lock.l_start = 0;
-    lock.l_len = 0;                                 /* whole file */
-
-    while (fcntl(fd, F_SETLKW, &lock) == -1) {
-        if (errno == EINTR) continue;               /* wait was interrupted */
-        log_err("Error acquiring lock: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-int unlock_file(int fd) {
-    struct flock lock;
-    memset(&lock, 0, sizeof(lock));
-    lock.l_type = F_UNLCK;
-    lock.l_whence = SEEK_SET;
-
-    if (fcntl(fd, F_SETLK, &lock) == -1) {
-        log_err("Error releasing lock: %s\n", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-
 /* ------------------------------------------------------------------------- */
 /* CSV rewrite: build new content in memory, then write+fsync+rename         */
 /* ------------------------------------------------------------------------- */
@@ -340,6 +254,20 @@ int csv_rewrite_begin(CsvRewrite *rw, const char *path, const char *tmp_path) {
         return -1;
     }
     return 0;
+}
+
+/* fsync() the directory that holds `path`, so the rename() itself survives a
+ * power failure (the file data was already fsync'ed). Best effort. */
+static void fsync_parent_dir(const char *path) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0'; else snprintf(dir, sizeof(dir), ".");
+
+    int dfd = open(dir, O_RDONLY);
+    if (dfd == -1) return;
+    fsync(dfd);
+    close(dfd);
 }
 
 int csv_rewrite_commit(CsvRewrite *rw) {
@@ -377,7 +305,6 @@ void csv_rewrite_abort(CsvRewrite *rw) {
     unlock_file(rw->fd);
     close(rw->fd);
 }
-
 
 /* ------------------------------------------------------------------------- */
 /* String buffer                                                             */
@@ -421,7 +348,105 @@ void sb_free(StrBuf *sb) {
     sb_init(sb);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Misc helpers                                                              */
+/* ------------------------------------------------------------------------- */
 
+/* Caller must hold the write lock of the file, otherwise two threads could
+ * compute the same "next id". */
+int get_next_id_csv(const char *csv_path) {
+    LineReader lr;
+    if (lr_open(&lr, csv_path) != 0) return 1;
+
+    char line[512];
+    int max_id = 0;
+
+    if (lr_next(&lr, line, sizeof(line))) {         /* skip header */
+        while (lr_next(&lr, line, sizeof(line))) {
+            int id;
+            if (sscanf(line, "%d,", &id) == 1 && id > max_id) max_id = id;
+        }
+    }
+
+    lr_close(&lr);
+    return max_id + 1;
+}
+
+/* Trims whitespace on both ends, in place. */
+void trim_string(char *str) {
+    size_t len = strlen(str);
+    while (len > 0 && (str[len - 1] == ' ' || str[len - 1] == '\t' ||
+                       str[len - 1] == '\n' || str[len - 1] == '\r')) {
+        str[--len] = '\0';
+    }
+
+    size_t start = 0;
+    while (str[start] == ' ' || str[start] == '\t') start++;
+    if (start > 0) memmove(str, str + start, len - start + 1);
+}
+
+/* Bounded copy that always NUL-terminates (replaces unsafe strcpy). */
+void safe_copy(char *dst, const char *src, size_t size) {
+    if (size == 0) return;
+    snprintf(dst, size, "%s", src);
+}
+
+/* A username/password must be non-empty, fit in FIELD_MAX, and must not
+ * contain characters that would corrupt the CSV format. */
+int is_valid_field(const char *s) {
+    size_t len = strlen(s);
+    if (len == 0 || len >= FIELD_MAX) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == ',' || s[i] == '\n' || s[i] == '\r') return 0;
+    }
+    return 1;
+}
+
+void sanitize_free_text(char *s) {
+    for (; *s; s++) {
+        if (*s == ',') *s = ';';
+        else if (*s == '\n' || *s == '\r') *s = ' ';
+    }
+}
+
+/* Strict number parsing: rejects "abc", "12abc", "nan", "inf", negatives. */
+int parse_amount(const char *s, double *out, int allow_zero) {
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+
+    if (end == s || errno != 0) return 0;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return 0;
+    if (!isfinite(v)) return 0;
+    if (allow_zero ? (v < 0) : (v <= 0)) return 0;
+    if (v > MAX_AMOUNT) return 0;
+
+    *out = v;
+    return 1;
+}
+
+int parse_int(const char *s, int *out) {
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+
+    if (end == s || errno != 0) return 0;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end != '\0') return 0;
+    if (v < INT_MIN || v > INT_MAX) return 0;
+
+    *out = (int)v;
+    return 1;
+}
+
+/* localtime() uses a static buffer and is NOT thread-safe; localtime_r is. */
+void current_timestamp(char *buf, size_t size) {
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    strftime(buf, size, "%Y-%m-%d %H:%M:%S", &tm_now);
+}
 
 int append_line(const char *path, const char *line) {
     int fd = open(path, O_WRONLY | O_APPEND);
@@ -449,40 +474,4 @@ int log_transaction(int cid, const char *type, double amt, double balance_after)
         log_err("[ALERT] passbook write FAILED: customer %d %s %.2f (balance already changed)\n",
                 cid, type, amt);
     return rc;
-}
-
-
-/* Caller must hold the write lock of the file, otherwise two threads could
- * compute the same "next id". */
-int get_next_id_csv(const char *csv_path) {
-    LineReader lr;
-    if (lr_open(&lr, csv_path) != 0) return 1;
-
-    char line[512];
-    int max_id = 0;
-
-    if (lr_next(&lr, line, sizeof(line))) {         /* skip header */
-        while (lr_next(&lr, line, sizeof(line))) {
-            int id;
-            if (sscanf(line, "%d,", &id) == 1 && id > max_id) max_id = id;
-        }
-    }
-
-    lr_close(&lr);
-    return max_id + 1;
-}
-
-
-/* fsync() the directory that holds `path`, so the rename() itself survives a
- * power failure (the file data was already fsync'ed). Best effort. */
-static void fsync_parent_dir(const char *path) {
-    char dir[256];
-    snprintf(dir, sizeof(dir), "%s", path);
-    char *slash = strrchr(dir, '/');
-    if (slash) *slash = '\0'; else snprintf(dir, sizeof(dir), ".");
-
-    int dfd = open(dir, O_RDONLY);
-    if (dfd == -1) return;
-    fsync(dfd);
-    close(dfd);
 }

@@ -30,7 +30,6 @@ int authenticate(int role, const char *username, const char *password, int *user
     return AUTH_OK;
 }
 
-
 void logout_user(int role, int user_id) {
     register_logout(role, user_id);
 }

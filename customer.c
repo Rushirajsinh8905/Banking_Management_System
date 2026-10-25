@@ -12,58 +12,6 @@
 /* Rule followed everywhere below: take the lock, touch the file, release the
  * lock, THEN talk to the client. Never block on the network with a lock held. */
 
-
-void handle_customer(int sock, int cid) {
-    char buffer[BUFFER_SIZE];
-
-    for (;;) {
-        send_message(sock,
-            "\n=== Customer Menu ===\n"
-            "1. View Account Balance\n"
-            "2. Deposit Money\n"
-            "3. Withdraw Money\n"
-            "4. Transfer Funds\n"
-            "5. Apply for a Loan\n"
-            "6. Check Loan Status\n"
-            "7. Change Password\n"
-            "8. Add Feedback\n"
-            "9. View Transaction History\n"
-            "10. Logout\n"
-            "Choice: ");
-
-        if (!read_input(sock, buffer, BUFFER_SIZE)) return;   /* disconnect */
-        int choice;
-        if (!parse_int(buffer, &choice)) choice = -1;
-
-        double amount;
-        switch (choice) {
-            case 1: view_balance(sock, cid); break;
-            case 2:
-            case 3:
-                send_message(sock, "Enter amount: ");
-                if (!read_input(sock, buffer, BUFFER_SIZE)) return;
-                /* FIX: negative / zero / non-numeric amounts used to be
-                 * accepted -> "deposit -500" was a withdrawal that skipped
-                 * the balance check. */
-                if (!parse_amount(buffer, &amount, 0)) {
-                    send_message(sock, "Invalid amount (must be a positive number)\n");
-                    break;
-                }
-                update_balance(sock, cid, amount, choice == 2);
-                break;
-            case 4: transfer_funds(sock, cid); break;
-            case 5: apply_loan(sock, cid); break;
-            case 6: check_loan_status(sock, cid); break;
-            case 7: change_password(sock, ROLE_CUSTOMER, cid); break;
-            case 8: add_feedback(sock, cid); break;
-            case 9: view_transactions(sock, cid); break;
-            case 10: return;
-            default: send_message(sock, "Invalid choice\n");
-        }
-    }
-}
-
-
 static void view_balance(int sock, int cid) {
     AccountRecord r;
     char msg[100];
@@ -76,7 +24,6 @@ static void view_balance(int sock, int cid) {
     else       snprintf(msg, sizeof(msg), "Error: account not found\n");
     send_message(sock, msg);
 }
-
 
 /* status codes for balance operations */
 enum { OP_NOT_FOUND = 0, OP_OK, OP_INSUFFICIENT, OP_INACTIVE, OP_IO_ERROR,
@@ -142,7 +89,6 @@ static void update_balance(int sock, int cid, double amount, int is_deposit) {
     }
     send_message(sock, msg);
 }
-
 
 static void transfer_funds(int sock, int cid) {
     char buf[BUFFER_SIZE];
@@ -228,7 +174,6 @@ static void transfer_funds(int sock, int cid) {
         default:                    send_message(sock, "Invalid accounts\n"); break;
     }
 }
-
 
 /* Accepts Personal/Home/Education (any case) or just P/H/E. */
 static int normalize_loan_type(const char *in, char *out, size_t n) {
@@ -330,7 +275,6 @@ static void check_loan_status(int sock, int cid) {
     sb_free(&out);
 }
 
-
 static void add_feedback(int sock, int cid) {
     char buf[BUFFER_SIZE];
 
@@ -389,4 +333,54 @@ static void view_transactions(int sock, int cid) {
     if (count == 0) sb_appendf(&out, "No transactions found\n");
     if (out.data) send_message(sock, out.data);
     sb_free(&out);
+}
+
+void handle_customer(int sock, int cid) {
+    char buffer[BUFFER_SIZE];
+
+    for (;;) {
+        send_message(sock,
+            "\n=== Customer Menu ===\n"
+            "1. View Account Balance\n"
+            "2. Deposit Money\n"
+            "3. Withdraw Money\n"
+            "4. Transfer Funds\n"
+            "5. Apply for a Loan\n"
+            "6. Check Loan Status\n"
+            "7. Change Password\n"
+            "8. Add Feedback\n"
+            "9. View Transaction History\n"
+            "10. Logout\n"
+            "Choice: ");
+
+        if (!read_input(sock, buffer, BUFFER_SIZE)) return;   /* disconnect */
+        int choice;
+        if (!parse_int(buffer, &choice)) choice = -1;
+
+        double amount;
+        switch (choice) {
+            case 1: view_balance(sock, cid); break;
+            case 2:
+            case 3:
+                send_message(sock, "Enter amount: ");
+                if (!read_input(sock, buffer, BUFFER_SIZE)) return;
+                /* FIX: negative / zero / non-numeric amounts used to be
+                 * accepted -> "deposit -500" was a withdrawal that skipped
+                 * the balance check. */
+                if (!parse_amount(buffer, &amount, 0)) {
+                    send_message(sock, "Invalid amount (must be a positive number)\n");
+                    break;
+                }
+                update_balance(sock, cid, amount, choice == 2);
+                break;
+            case 4: transfer_funds(sock, cid); break;
+            case 5: apply_loan(sock, cid); break;
+            case 6: check_loan_status(sock, cid); break;
+            case 7: change_password(sock, ROLE_CUSTOMER, cid); break;
+            case 8: add_feedback(sock, cid); break;
+            case 9: view_transactions(sock, cid); break;
+            case 10: return;
+            default: send_message(sock, "Invalid choice\n");
+        }
+    }
 }

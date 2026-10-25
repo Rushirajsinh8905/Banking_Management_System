@@ -110,7 +110,6 @@ int find_account_by_username(int role, const char *username, AccountRecord *out)
     return find_account(role, 0, username, out);
 }
 
-
 int parse_loan_line(const char *line, LoanRecord *l) {
     memset(l, 0, sizeof(*l));
     if (sscanf(line, "%d,%d,%lf,%19[^,],%d,%19[^,],%19[^\n]",

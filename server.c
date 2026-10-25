@@ -35,12 +35,10 @@ static pthread_mutex_t clients_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  clients_cv  = PTHREAD_COND_INITIALIZER;
 static time_t start_time;
 
-
 typedef struct {
     int  sock;
     char peer[64];
 } ClientArg;
-
 
 static int register_client(int fd) {
     int ok = 0;
@@ -59,7 +57,6 @@ static int register_client(int fd) {
     return ok;
 }
 
-
 /* Must be called BEFORE close(fd), so the main thread never calls shutdown()
  * on an fd number that has already been closed and reused. */
 static void unregister_client(int fd) {
@@ -73,6 +70,18 @@ static void unregister_client(int fd) {
     }
     pthread_cond_signal(&clients_cv);       /* wake shutdown waiter */
     pthread_mutex_unlock(&clients_mtx);
+}
+
+void print_server_status(void) {
+    pthread_mutex_lock(&clients_mtx);
+    int clients = active_clients;
+    pthread_mutex_unlock(&clients_mtx);
+
+    long up = (long)(time(NULL) - start_time);
+    log_out("\n[status] PID %d | uptime %ldh %02ldm %02lds | connected clients: %d/%d | "
+           "logged-in sessions: %d/%d\n",
+           (int)getpid(), up / 3600, (up % 3600) / 60, up % 60,
+           clients, MAX_CLIENTS, count_active_sessions(), MAX_SESSIONS);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -167,19 +176,6 @@ static void *handle_client(void *arg) {
     return NULL;
 }
 
-
-void print_server_status(void) {
-    pthread_mutex_lock(&clients_mtx);
-    int clients = active_clients;
-    pthread_mutex_unlock(&clients_mtx);
-
-    long up = (long)(time(NULL) - start_time);
-    log_out("\n[status] PID %d | uptime %ldh %02ldm %02lds | connected clients: %d/%d | "
-           "logged-in sessions: %d/%d\n",
-           (int)getpid(), up / 3600, (up % 3600) / 60, up % 60,
-           clients, MAX_CLIENTS, count_active_sessions(), MAX_SESSIONS);
-}
-
 /* ------------------------------------------------------------------------- */
 /* Graceful shutdown                                                         */
 /* ------------------------------------------------------------------------- */
@@ -221,7 +217,6 @@ static void graceful_shutdown(int listen_fd) {
     destroy_session_manager();
     log_out("[shutdown] Server stopped cleanly. Bye!\n");
 }
-
 
 /* ------------------------------------------------------------------------- */
 int main(int argc, char *argv[]) {

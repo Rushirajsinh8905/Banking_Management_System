@@ -65,36 +65,6 @@ static void activate_account(int sock) {
     else            send_message(sock, "Account not found\n");
 }
 
-
-void handle_manager(int sock, int mid) {
-    char buffer[BUFFER_SIZE];
-
-    for (;;) {
-        send_message(sock,
-            "\n=== Manager Menu ===\n"
-            "1. Activate/Deactivate Customer Accounts\n"
-            "2. Assign Loan Application Processes to Employees\n"
-            "3. Review Customer Feedback\n"
-            "4. Change Password\n"
-            "5. Logout\n"
-            "Choice: ");
-
-        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
-        int choice;
-        if (!parse_int(buffer, &choice)) choice = -1;
-
-        switch (choice) {
-            case 1: activate_account(sock); break;
-            case 2: assign_loan(sock); break;
-            case 3: view_feedback(sock); break;
-            case 4: change_password(sock, ROLE_MANAGER, mid); break;
-            case 5: return;
-            default: send_message(sock, "Invalid choice\n");
-        }
-    }
-}
-
-
 static void assign_loan(int sock) {
     char buf[BUFFER_SIZE];
     int lid, eid;
@@ -220,4 +190,32 @@ static void view_feedback(int sock) {
     db_unlock(DB_FEEDBACK);
 
     send_message(sock, ok ? "All feedback marked as reviewed\n" : "Error updating feedback\n");
+}
+
+void handle_manager(int sock, int mid) {
+    char buffer[BUFFER_SIZE];
+
+    for (;;) {
+        send_message(sock,
+            "\n=== Manager Menu ===\n"
+            "1. Activate/Deactivate Customer Accounts\n"
+            "2. Assign Loan Application Processes to Employees\n"
+            "3. Review Customer Feedback\n"
+            "4. Change Password\n"
+            "5. Logout\n"
+            "Choice: ");
+
+        if (!read_input(sock, buffer, BUFFER_SIZE)) return;
+        int choice;
+        if (!parse_int(buffer, &choice)) choice = -1;
+
+        switch (choice) {
+            case 1: activate_account(sock); break;
+            case 2: assign_loan(sock); break;
+            case 3: view_feedback(sock); break;
+            case 4: change_password(sock, ROLE_MANAGER, mid); break;
+            case 5: return;
+            default: send_message(sock, "Invalid choice\n");
+        }
+    }
 }
